@@ -68,6 +68,738 @@ import {
   Bookmark,
   BookmarkCheck,
   BookmarkPlus,
+  SlidersHorizontal,
+  Database
+} from "lucide-react";
+import {
+  BarChart,
+  Bar,
+  LineChart,
+  Line,
+  RadarChart,
+  Radar,
+  PolarGrid,
+  PolarAngleAxis,
+  PolarRadiusAxis,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer
+} from "recharts";
+import { MOCK_TALENTS } from "./data";
+import {
+  TalentProfile,
+  RetiringPosition,
+  PotentialAssessment,
+  PerformanceEvaluation,
+  SavedFilter,
+  TrainingItem,
+  DeleteConfirmModalConfig,
+  SupabaseNoticeModalConfig
+} from "./types";
+import {
+  FEMALE_AVATARS,
+  MALE_AVATARS,
+  detectGenderFromName,
+  getSyncedAvatarUrl,
+  compressImageFile
+} from "./utils/avatarUtils";
+import {
+  getSupabaseConfig,
+  saveSupabaseConfig,
+  getSupabaseClient,
+  pushToSupabase,
+  pullFromSupabase
+} from "./supabaseClient";
+
+const pageVariants = {
+  initial: (direction: number) => ({
+    opacity: 0,
+    x: direction * 120,
+    scale: 0.98,
+    filter: "blur(4px)"
+  }),
+  animate: {
+    opacity: 1,
+    x: 0,
+    scale: 1,
+    filter: "blur(0px)",
+    transition: {
+      type: "spring",
+      stiffness: 260,
+      damping: 26,
+      mass: 0.8
+    }
+  },
+  exit: (direction: number) => ({
+    opacity: 0,
+    x: -direction * 120,
+    scale: 0.98,
+    filter: "blur(4px)",
+    transition: {
+      type: "spring",
+      stiffness: 260,
+      damping: 26,
+      mass: 0.8
+    }
+  })
+};
+
+const getCellName = (perf: "Low" | "Medium" | "High", pot: "Low" | "Medium" | "High") => {
+  if (pot === "High") {
+    if (perf === "Low") return "Enigma (Box 4)";
+    if (perf === "Medium") return "High Potential (Box 7)";
+    return "Star Leader (Box 9)";
+  }
+  if (pot === "Medium") {
+    if (perf === "Low") return "Inconsistent Performer (Box 2)";
+    if (perf === "Medium") return "Core Contributor (Box 5)";
+    return "High Performer (Box 8)";
+  }
+  if (perf === "Low") return "Underperformer (Box 1)";
+  if (perf === "Medium") return "Solid Performer (Box 3)";
+  return "Workhorse / Specialist (Box 6)";
+};
+
+const getPlacementRecommendation = (perf: "Low" | "Medium" | "High", pot: "Low" | "Medium" | "High") => {
+  if (pot === "High") {
+    if (perf === "Low") return "Bimbingan kinerja intensif untuk mengeksplorasi hambatan dan mengoptimalkan potensi kepemimpinan tinggi.";
+    if (perf === "Medium") return "Berikan tanggung jawab proyek lintas divisi dan mentoring kepemimpinan tingkat lanjut untuk persiapan promosi.";
+    return "Kandidat prioritas utama untuk suksesi kepemimpinan langsung (Ready Now). Berikan pelatihan eksekutif.";
+  }
+  if (pot === "Medium") {
+    if (perf === "Low") return "Evaluasi ulang kesesuaian peran saat ini dan berikan pelatihan teknis terfokus.";
+    if (perf === "Medium") return "Pertahankan performa stabil dengan program pengayaan tugas (job enrichment).";
+    return "Pertimbangkan untuk jalur spesialis senior atau penugasan strategis skala menengah.";
+  }
+  if (perf === "Low") return "Diperlukan Rencana Peningkatan Kinerja (PIP) terstruktur dan monitoring ketat.";
+  if (perf === "Medium") return "Fokus pada stabilisasi hasil kerja harian dan tingkatkan motivasi kerja.";
+  return "Manfaatkan keahlian teknis secara maksimal untuk operasional harian dan mentoring staf junior.";
+};
+
+export default function App() {
+  // Appearance / Theme State
+  const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
+    return localStorage.getItem("theme") === "dark";
+  });
+
+  React.useEffect(() => {
+    if (isDarkMode) {
+      document.documentElement.classList.add("dark");
+      localStorage.setItem("theme", "dark");
+    } else {
+      document.documentElement.classList.remove("dark");
+      localStorage.setItem("theme", "light");
+    }
+  }, [isDarkMode]);
+
+  // Authentication & View states
+  const [authState, setAuthState] = useState<"landing" | "login" | "authenticated">("landing");
+  const [userRole, setUserRole] = useState<"admin" | "user">("admin");
+  const [loginEmail, setLoginEmail] = useState("admin@ajinomoto.com");
+  const [loginPassword, setLoginPassword] = useState("password123");
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [loginError, setLoginError] = useState("");
+
+  // Navigation states
+  const [activeTab, setActiveTabRaw] = useState<"home" | "talent-pool" | "profile" | "settings" | "nine-box">("profile");
+  const [direction, setDirection] = useState<number>(1);
+
+  const setActiveTab = (newTab: "home" | "talent-pool" | "profile" | "settings" | "nine-box") => {
+    const tabOrder: ("home" | "talent-pool" | "nine-box" | "profile" | "settings")[] = [
+      "home",
+      "talent-pool",
+      "nine-box",
+      "profile",
+      "settings"
+    ];
+    const currentIdx = tabOrder.indexOf(activeTab);
+    const nextIdx = tabOrder.indexOf(newTab);
+    if (currentIdx !== -1 && nextIdx !== -1 && nextIdx !== currentIdx) {
+      setDirection(nextIdx > currentIdx ? 1 : -1);
+    }
+    setActiveTabRaw(newTab);
+  };
+
+  const [dashboardSubTab, setDashboardSubTab] = useState<"analytics" | "retirement">("analytics");
+  const [managerialTarget, setManagerialTarget] = useState<number>(4.0);
+
+  // Default Initial Retiring Positions
+  const DEFAULT_RETIRING_POSITIONS: RetiringPosition[] = [
+    {
+      id: "pos-dm-fi",
+      positionName: "Department Manager Food Ingredients-1",
+      currentIncumbent: "SUWITO",
+      retirementDate: "Maret 2027 (9 Bulan)",
+      division: "Food Ingredients-1 (A-MJK)",
+      urgency: "High",
+      targetCompetencies: ["Leadership", "Problem Solving"],
+      assignedSuccessorId: "edwin-prasetyo",
+      suitabilityStatus: "Primary"
+    },
+    {
+      id: "pos-dm-hse",
+      positionName: "Department Manager Health Safety & Environment",
+      currentIncumbent: "REZA GILANG MAHARDIKA",
+      retirementDate: "November 2026 (4 Bulan)",
+      division: "Health Safety & Environtment Dept (A-MJK)",
+      urgency: "High",
+      targetCompetencies: ["Interpersonal Skill", "Problem Solving"],
+      assignedSuccessorId: "muhammad-kholidin",
+      suitabilityStatus: "Primary"
+    },
+    {
+      id: "pos-dm-foe",
+      positionName: "Department Manager Factory Operational Excellence",
+      currentIncumbent: "DIDIK SULISTIYO",
+      retirementDate: "Agustus 2027 (13 Bulan)",
+      division: "Factory Operational Excellence  (A-MJK) Dept",
+      urgency: "Medium",
+      targetCompetencies: ["Business Knowledge", "Leadership"],
+      assignedSuccessorId: "nawang-purma",
+      suitabilityStatus: "Primary"
+    },
+    {
+      id: "pos-dm-procurement",
+      positionName: "Department Manager Procurement & EXIM",
+      currentIncumbent: "FININAWATI DWI WAHYUDI",
+      retirementDate: "Desember 2027 (17 Bulan)",
+      division: "Procurement & EXIM (A-MJK)",
+      urgency: "Medium",
+      targetCompetencies: ["Interpersonal Skill", "Problem Solving"],
+      assignedSuccessorId: "moch-ari",
+      suitabilityStatus: "Primary"
+    },
+    {
+      id: "pos-sm-ppc",
+      positionName: "Section Manager Production Planning & Control",
+      currentIncumbent: "AGIL SETIAWAN",
+      retirementDate: "Juni 2028 (2 Tahun)",
+      division: "Production Planning & Control (A-MJK)",
+      urgency: "Low",
+      targetCompetencies: ["Business Knowledge", "Leadership"],
+      assignedSuccessorId: "lutfia-anggraini",
+      suitabilityStatus: "Primary"
+    }
+  ];
+
+  // Talent management states with Local Database Persistence
+  const [talents, setTalents] = useState<TalentProfile[]>(() => {
+    try {
+      const saved = localStorage.getItem("talent_database_records");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (e) {
+      console.error("Gagal membaca database talenta dari localStorage", e);
+    }
+    return MOCK_TALENTS;
+  });
+
+  const [selectedTalentId, setSelectedTalentId] = useState<string>("edwin-prasetyo");
+  const [previewTalentId, setPreviewTalentId] = useState<string>("edwin-prasetyo");
+
+  // Retiring positions succession planning state with Local Database Persistence
+  const [retiringPositions, setRetiringPositions] = useState<RetiringPosition[]>(() => {
+    try {
+      const saved = localStorage.getItem("retiring_positions_records");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (e) {
+      console.error("Gagal membaca data posisi pensiun dari localStorage", e);
+    }
+    return DEFAULT_RETIRING_POSITIONS;
+  });
+
+  // Sync talents to local database system
+  React.useEffect(() => {
+    try {
+      localStorage.setItem("talent_database_records", JSON.stringify(talents));
+    } catch (e) {
+      console.error("Gagal menyimpan database talenta ke localStorage", e);
+    }
+  }, [talents]);
+
+  // Sync retiring positions to local database system
+  React.useEffect(() => {
+    try {
+      localStorage.setItem("retiring_positions_records", JSON.stringify(retiringPositions));
+    } catch (e) {
+      console.error("Gagal menyimpan data posisi pensiun ke localStorage", e);
+    }
+  }, [retiringPositions]);
+
+  const [isAddRetiringPositionOpen, setIsAddRetiringPositionOpen] = useState(false);
+  const retiringImportInputRef = React.useRef<HTMLInputElement>(null);
+
+  // Active Succession Candidates filters
+  const [activeCandidateSearch, setActiveCandidateSearch] = useState<string>("");
+  const [activeCandidateDivisionFilter, setActiveCandidateDivisionFilter] = useState<string>("All");
+  const [activeCandidateReadinessFilter, setActiveCandidateReadinessFilter] = useState<string>("All");
+
+  // Skill Gap Heatmap filters
+  const [heatmapSearch, setHeatmapSearch] = useState<string>("");
+  const [heatmapDeptFilter, setHeatmapDeptFilter] = useState<string>("All");
+  const [heatmapGapFilter, setHeatmapGapFilter] = useState<string>("All");
+
+  // Retiring positions succession filters
+  const [retiringPosSearch, setRetiringPosSearch] = useState<string>("");
+  const [retiringPosUrgencyFilter, setRetiringPosUrgencyFilter] = useState<string>("All");
+  const [retiringPosStatusFilter, setRetiringPosStatusFilter] = useState<string>("All");
+
+  // Candidate matcher filters
+  const [candidateSearch, setCandidateSearch] = useState<string>("");
+  const [candidateReadinessFilter, setCandidateReadinessFilter] = useState<string>("All");
+  const [candidateMatchFilter, setCandidateMatchFilter] = useState<string>("All");
+
+  // Succession Pipeline Alignment table filters
+  const [successionPipelineSearch, setSuccessionPipelineSearch] = useState<string>("");
+  const [successionPipelineUrgencyFilter, setSuccessionPipelineUrgencyFilter] = useState<string>("All");
+  const [selectedRetiringPositionId, setSelectedRetiringPositionId] = useState<string | null>(null);
+
+  // Candidate Readiness search
+  const [readinessSearch, setReadinessSearch] = useState<string>("");
+
+  const ensurePotentialAssessment = (talent: TalentProfile): PotentialAssessment => {
+    if (talent.potentialAssessment) return talent.potentialAssessment;
+    return {
+      kemampuanIntelektual: 3,
+      berpikirKritis: 3,
+      menyelesaikanMasalah: 2,
+      belajarCepat: 3,
+      kesadaranDiri: 2,
+      interpersonal: 2,
+      kecerdasanEmosional: 2,
+      motivasiKomitmen: 3,
+      businessKnowledge: 4,
+      leadership: 3,
+      problemSolving: 3,
+      interpersonalSkill: 3,
+      strategicMindset: 3,
+      managesComplexity: 3,
+      ensuresAccountability: 3,
+      drivesVision: 3,
+      cultivateInnovation: 2,
+      studyBackgroundName: "S2 Manajemen Bisnis",
+      studyBackgroundScore: 3,
+      targetLevel: "DM"
+    };
+  };
+
+  const calculateTalentPotentialDetails = (talent: TalentProfile) => {
+    const assessment = ensurePotentialAssessment(talent);
+
+    // 1. Psychological Test (40%)
+    const sumPsych =
+      (assessment.kemampuanIntelektual || 0) +
+      (assessment.berpikirKritis || 0) +
+      (assessment.menyelesaikanMasalah || 0) +
+      (assessment.belajarCepat || 0) +
+      (assessment.kesadaranDiri || 0) +
+      (assessment.interpersonal || 0) +
+      (assessment.kecerdasanEmosional || 0) +
+      (assessment.motivasiKomitmen || 0);
+    const psychRatio = sumPsych / 24;
+    const psychWeighted = psychRatio * 40;
+
+    // 2. Competency (50%)
+    const sumComp =
+      (assessment.businessKnowledge || 0) +
+      (assessment.leadership || 0) +
+      (assessment.problemSolving || 0) +
+      (assessment.interpersonalSkill || 0) +
+      (assessment.strategicMindset || 0) +
+      (assessment.managesComplexity || 0) +
+      (assessment.ensuresAccountability || 0) +
+      (assessment.drivesVision || 0) +
+      (assessment.cultivateInnovation || 0);
+
+    const divisor = assessment.targetLevel === "SM" ? 2 : 3;
+    const compMax = divisor * 9;
+    const compRatio = sumComp / compMax;
+    const compWeighted = compRatio * 50;
+
+    // 3. Study Background (10%)
+    const bgStandard = 4.0;
+    const bgRatio = (assessment.studyBackgroundScore || 0) / bgStandard;
+    const bgWeighted = bgRatio * 10;
+
+    let rawPotentialScore = Math.min(psychWeighted + compWeighted + bgWeighted, 100);
+    let totalPotentialScore = rawPotentialScore;
+
+    if (talent.customPotential === "Low") {
+      totalPotentialScore = Math.round(20 + (rawPotentialScore / 100) * 28);
+    } else if (talent.customPotential === "Medium") {
+      totalPotentialScore = Math.round(50 + (rawPotentialScore / 100) * 24);
+    } else if (talent.customPotential === "High") {
+      totalPotentialScore = Math.round(76 + (rawPotentialScore / 100) * 22);
+    }
+
+    return {
+      sumPsych,
+      psychRatio,
+      psychWeighted,
+      sumComp,
+      compMax,
+      compRatio,
+      compWeighted,
+      bgRatio,
+      bgWeighted,
+      bgStandard,
+      totalPotentialScore,
+      assessment
+    };
+  };
+
+  const calculateTalentPerformanceDetails = (talent: TalentProfile) => {
+    let score50 = 31.25;
+    let isFromImport = false;
+    let is0To50Scale = false;
+    let avgRawScore = 0;
+
+    const evalScores = ["2020", "2021", "2022", "2023", "2024"].map(
+      (yr) => talent.performanceEvaluation?.[`fy${yr}`]
+    );
+    const nonZeroScores = evalScores.filter((s): s is number => typeof s === "number" && !isNaN(s) && s > 0);
+
+    if (nonZeroScores.length > 0) {
+      const maxVal = Math.max(...nonZeroScores);
+      avgRawScore = nonZeroScores.reduce((a, b) => a + b, 0) / nonZeroScores.length;
+
+      if (maxVal > 5.0) {
+        is0To50Scale = true;
+        score50 = avgRawScore;
+      } else {
+        is0To50Scale = false;
+        score50 = 12.5 + ((avgRawScore - 1.0) / 4.0) * 37.5;
+      }
+    } else if (talent.importedEvaluasiScore !== undefined && talent.importedEvaluasiScore > 0) {
+      isFromImport = true;
+      score50 = talent.importedEvaluasiScore > 50 ? (talent.importedEvaluasiScore / 100) * 50 : talent.importedEvaluasiScore;
+      avgRawScore = score50;
+      is0To50Scale = score50 > 5.0;
+    }
+
+    score50 = Math.min(Math.max(score50, 12.5), 50.0);
+    const percentage = (score50 / 50.0) * 100;
+
+    let perfLevel: "Low" | "Medium" | "High" = "Medium";
+
+    if (talent.customPerformance) {
+      perfLevel = talent.customPerformance;
+    } else if (talent.importedEvaluasiCategory) {
+      const cat = talent.importedEvaluasiCategory.toLowerCase();
+      if (cat.includes("tinggi") || cat.includes("high") || cat === "3") perfLevel = "High";
+      else if (cat.includes("rendah") || cat.includes("low") || cat === "1") perfLevel = "Low";
+      else perfLevel = "Medium";
+    } else {
+      if (score50 < 25.0) perfLevel = "Low";
+      else if (score50 < 37.5) perfLevel = "Medium";
+      else perfLevel = "High";
+    }
+
+    const code = perfLevel === "Low" ? 1 : perfLevel === "Medium" ? 2 : 3;
+    const categoryName = perfLevel === "Low" ? "Rendah" : perfLevel === "Medium" ? "Sedang" : "Tinggi";
+
+    return {
+      score50,
+      percentage,
+      perfLevel,
+      categoryName,
+      code,
+      isFromImport,
+      avgRawScore,
+      is0To50Scale
+    };
+  };
+
+  const getTalentPerformanceScore = (talent: TalentProfile) => {
+    const { score50 } = calculateTalentPerformanceDetails(talent);
+    return Number(score50.toFixed(2));
+  };
+
+  const getTalentCoordinates = (talent: TalentProfile) => {
+    const { totalPotentialScore } = calculateTalentPotentialDetails(talent);
+    let xVal = (totalPotentialScore / 100) * 1.333333;
+
+    if (talent.customPotential === "Low") {
+      xVal = Math.min(0.43, Math.max(0.05, xVal));
+    } else if (talent.customPotential === "Medium") {
+      xVal = Math.min(0.87, Math.max(0.45, xVal));
+    } else if (talent.customPotential === "High") {
+      xVal = Math.min(1.30, Math.max(0.90, xVal));
+    }
+
+    const details = calculateTalentPerformanceDetails(talent);
+    let yVal = details.score50;
+
+    if (talent.customPerformance === "Low") {
+      yVal = Math.min(24.8, Math.max(12.7, yVal));
+    } else if (talent.customPerformance === "Medium") {
+      yVal = Math.min(37.3, Math.max(25.2, yVal));
+    } else if (talent.customPerformance === "High") {
+      yVal = Math.min(49.8, Math.max(37.7, yVal));
+    }
+
+    return {
+      x: Math.min(Math.max(xVal, 0.00), 1.333333),
+      y: Math.min(Math.max(yVal, 12.5), 50.0)
+    };
+  };
+
+  const getTalentPlacement = (talent: TalentProfile): { performance: "Low" | "Medium" | "High"; potential: "Low" | "Medium" | "High" } => {
+    const coords = getTalentCoordinates(talent);
+    let potential: "Low" | "Medium" | "High" = "Medium";
+    if (talent.customPotential) {
+      potential = talent.customPotential;
+    } else {
+      if (coords.x <= 0.44444444) potential = "Low";
+      else if (coords.x <= 0.88888888) potential = "Medium";
+      else potential = "High";
+    }
+
+    let performance: "Low" | "Medium" | "High" = "Medium";
+    if (talent.customPerformance) {
+      performance = talent.customPerformance;
+    } else {
+      const details = calculateTalentPerformanceDetails(talent);
+      performance = details.perfLevel;
+    }
+
+    return { performance, potential };
+  };
+
+  const handleUpdateReadiness = (talentId: string, newReadiness: string) => {
+    const getReadinessColor = (ready: string): "emerald" | "amber" | "rose" | "teal" => {
+      if (ready === "READY NOW") return "emerald";
+      if (ready === "READY 1-2 YEARS") return "amber";
+      if (ready === "READY 2+ YEARS") return "rose";
+      return "teal";
+    };
+
+    setTalents((prev) =>
+      prev.map((t) => {
+        if (t.id === talentId) {
+          return {
+            ...t,
+            readiness: newReadiness,
+            readinessColor: getReadinessColor(newReadiness)
+          };
+        }
+        return t;
+      })
+    );
+  };
+
+  const currentTalent = talents.find((t) => t.id === selectedTalentId) || talents[0];
+  const readyNowCount = talents.filter((t) => t.readiness === "READY NOW").length;
+
+  return (
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col font-sans selection:bg-primary/10">
+      {/* Header Bar */}
+      <header className="w-full bg-white/90 dark:bg-slate-900 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 sticky top-0 z-40 px-6 py-4 flex justify-between items-center">
+        <div className="flex items-center gap-3">
+          <img
+            src="https://upload.wikimedia.org/wikipedia/commons/0/01/Ajinomoto_Group_Global_Brand_logo.png"
+            className="h-8 object-contain"
+            alt="Logo"
+          />
+          <div className="border-l border-slate-200 dark:border-slate-700 pl-3">
+            <span className="font-display text-sm font-black text-primary dark:text-teal-400 block leading-none">
+              AJINOMOTO INDONESIA
+            </span>
+            <span className="text-[9px] text-slate-500 font-extrabold uppercase tracking-wider block mt-1">
+              Succession Suite
+            </span>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setIsDarkMode(!isDarkMode)}
+            className="p-2.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-amber-400 cursor-pointer"
+          >
+            {isDarkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+          </button>
+          <button
+            onClick={() => setAuthState("landing")}
+            className="bg-primary text-white text-xs font-bold px-4 py-2 rounded-lg cursor-pointer shadow-sm"
+          >
+            Kembali ke Beranda
+          </button>
+        </div>
+      </header>
+
+      {/* Main Body */}
+      <main className="flex-1 max-w-7xl w-full mx-auto p-6 space-y-6">
+        <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-6 shadow-sm flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+          <div>
+            <h1 className="text-2xl font-black font-display text-slate-900 dark:text-slate-100">
+              {currentTalent.name}
+            </h1>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+              {currentTalent.title} • {currentTalent.division}
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span
+              className={`text-xs font-black px-3 py-1 rounded-full border ${
+                currentTalent.readinessColor === "emerald"
+                  ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                  : "bg-amber-50 text-amber-700 border-amber-200"
+              }`}
+            >
+              {currentTalent.readiness}
+            </span>
+          </div>
+        </div>
+
+        {/* Global Readiness Calibration Panel */}
+        <section className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-6 shadow-sm space-y-4">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-slate-100 dark:border-slate-800 pb-3">
+            <div>
+              <h3 className="font-display font-bold text-sm text-primary uppercase tracking-wider">
+                Kalibrasi Tingkat Kesiapan Talent (Global Readiness Calibration)
+              </h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Ubah status kesiapan suksesi kandidat secara langsung di bawah ini.
+              </p>
+            </div>
+
+            <div className="relative w-full sm:w-64">
+              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Cari nama atau jabatan..."
+                value={readinessSearch}
+                onChange={(e) => setReadinessSearch(e.target.value)}
+                className="w-full pl-9 pr-3 py-1.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs focus:outline-none focus:border-primary text-slate-900 dark:text-slate-100"
+              />
+            </div>
+          </div>
+
+          <div className="max-h-[400px] overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+            {talents
+              .filter(
+                (t) =>
+                  !readinessSearch.trim() ||
+                  t.name.toLowerCase().includes(readinessSearch.toLowerCase()) ||
+                  t.title.toLowerCase().includes(readinessSearch.toLowerCase())
+              )
+              .map((t) => (
+                <div
+                  key={t.id}
+                  className="flex items-center justify-between gap-3 p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg border border-slate-200 dark:border-slate-700"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <img
+                      src={t.avatar}
+                      className="w-9 h-9 rounded-full object-cover border border-slate-200 shrink-0"
+                      alt={t.name}
+                      referrerPolicy="no-referrer"
+                    />
+                    <div className="min-w-0">
+                      <span className="text-xs font-bold text-slate-900 dark:text-slate-100 block truncate">
+                        {t.name}
+                      </span>
+                      <span className="text-[10px] text-slate-500 dark:text-slate-400 block truncate">
+                        {t.title} ({t.division})
+                      </span>
+                    </div>
+                  </div>
+
+                  <select
+                    value={t.readiness}
+                    onChange={(e) => handleUpdateReadiness(t.id, e.target.value)}
+                    className="text-[10px] font-bold px-2.5 py-1 rounded-full border bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-700 cursor-pointer focus:outline-none"
+                  >
+                    <option value="READY NOW">READY NOW</option>
+                    <option value="READY 1-2 YEARS">READY 1-2 YEARS</option>
+                    <option value="READY 2+ YEARS">READY 2+ YEARS</option>
+                  </select>
+                </div>
+              ))}
+          </div>
+        </section>
+      </main>
+    </div>
+  );
+}import React, { useState } from "react";
+import { motion, AnimatePresence } from "motion/react";
+import { encryptText, decryptText, calculateHash } from "./crypto";
+import {
+  ArrowLeft,
+  MoreVertical,
+  ShieldCheck,
+  TrendingUp,
+  HelpCircle,
+  ChevronRight,
+  ChevronLeft,
+  Download,
+  MapPin,
+  Building2,
+  History,
+  Brain,
+  Calendar,
+  BarChart3,
+  GraduationCap,
+  BookOpen,
+  LayoutGrid,
+  Users,
+  User,
+  Settings,
+  Search,
+  Sliders,
+  Sparkles,
+  Printer,
+  X,
+  FileText,
+  FileSpreadsheet,
+  AlertCircle,
+  Plus,
+  Trash2,
+  CheckCircle2,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Keyboard,
+  Command,
+  Zap,
+  Compass,
+  Edit2,
+  Send,
+  UserPlus,
+  Clock,
+  Award,
+  UserCheck,
+  Grid3X3,
+  Lock,
+  Unlock,
+  ShieldAlert,
+  Key,
+  Mail,
+  Tag,
+  Upload,
+  Moon,
+  Sun,
+  Move,
+  Save,
+  UserCog,
+  Cloud,
+  RefreshCw,
+  RotateCcw,
+  Target,
+  TrendingDown,
+  AlertTriangle,
+  Camera,
+  Bookmark,
+  BookmarkCheck,
+  BookmarkPlus,
   SlidersHorizontal
 } from "lucide-react";
 import {
